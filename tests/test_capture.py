@@ -20,7 +20,7 @@ import pytest
 
 from engram.capture.adapters.claude_code import ClaudeCodeAdapter
 from engram.capture.ingest import record_event, session_end, session_start
-from engram.capture.tailer import encode_project_path
+from engram.capture.tailer import encode_project_path, parse_transcript_lines
 from engram.db.runner import open_db
 from engram.store.sqlite_store import SQLiteEventStore, SQLiteMemoryStore
 
@@ -527,6 +527,33 @@ class TestGapDetection:
         result = session_end(event_store, session_id)
         assert result["capture_complete"] is False, "gap not detected"
         assert 3 in result["gaps"], f"missing seq 3 not in gaps: {result['gaps']}"
+
+    def test_parse_transcript_lines_malformed_surfaces_as_gap(self, stores, session_id):
+        """AC-2: a malformed line consumes its source_seq but emits nothing, so the
+        missing number is a provable gap — never a silent drop."""
+        event_store, _ = stores
+        ts = datetime.now(UTC)
+        lines = [
+            '{"type":"user","message":{"role":"user","content":"one"}}',
+            "{ this is not valid json",  # line 2 — must NOT vanish silently
+            '{"type":"user","message":{"role":"user","content":"three"}}',
+        ]
+        emitted = list(parse_transcript_lines(lines, raw_ref_file="x.jsonl"))
+        # Only the two valid records are yielded, with source_seq 1 and 3 (2 skipped).
+        assert [seq for _, _, _, seq in emitted] == [1, 3]
+        for record, _, _, seq in emitted:
+            record_event(
+                event_store,
+                session_id,
+                "user_prompt",
+                record,
+                source_seq=seq,
+                occurred_at=ts,
+                source_type="transcript",
+            )
+        result = session_end(event_store, session_id)
+        assert result["capture_complete"] is False
+        assert 2 in result["gaps"], f"malformed line not surfaced as gap: {result['gaps']}"
 
     def test_pending_span_makes_session_incomplete(self, stores, session_id):
         """A tool_call with no matching tool_result is a pending span → incomplete."""

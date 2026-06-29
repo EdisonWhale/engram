@@ -16,9 +16,12 @@ encodeClaudeProjectPath(cwd): replace '/' → '-' and '.' → '-'
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def encode_project_path(cwd: str) -> str:
@@ -148,23 +151,38 @@ def parse_transcript_lines(
     *,
     raw_ref_file: str = "",
     start_offset: int = 0,
-) -> Iterator[tuple[dict[str, Any], str, int]]:
-    """Parse pre-loaded transcript lines into (record_dict, raw_ref_file, byte_offset).
+) -> Iterator[tuple[dict[str, Any], str, int, int]]:
+    """Parse transcript lines into (record_dict, raw_ref_file, byte_offset, source_seq).
 
-    Used in tests and one-shot backfill scenarios where the full content is
-    already in memory.  For production live-tailing, use TranscriptTailer.
+    ``source_seq`` is the 1-based index of the line among non-blank lines — i.e.
+    the source-of-truth line number used for completeness checking (spec §26).
+    The caller passes ``source_seq`` straight through to ``record_event`` so a
+    dropped record surfaces as a gap at ``session_end``.
 
-    Skips blank lines and non-JSON lines (logs the error, does not raise).
+    Completeness invariant: a malformed (non-JSON) line is NOT silently skipped.
+    Its source_seq is consumed (the counter advances) but no event is emitted for
+    it, so the missing number shows up as a provable gap rather than vanishing.
+    Blank lines are not records and do not consume a source_seq.
     """
     offset = start_offset
+    source_seq = 0
     for line in lines:
         line_bytes = line.encode()
         if line.strip():
+            source_seq += 1
             try:
                 record = json.loads(line)
-                yield record, raw_ref_file, offset
+                yield record, raw_ref_file, offset, source_seq
             except json.JSONDecodeError:
-                pass  # Build defensively — skip unparseable lines
+                # Consume the source_seq but emit nothing → detectable gap, not a
+                # silent drop. Never raise: one bad line must not abort capture.
+                logger.warning(
+                    "unparseable transcript line at %s offset %d (source_seq=%d); "
+                    "recorded as a capture gap",
+                    raw_ref_file or "<memory>",
+                    offset,
+                    source_seq,
+                )
         offset += len(line_bytes) + 1  # +1 for the newline
 
 
