@@ -1,6 +1,7 @@
 # Engram — Task Breakdown & Parallel Build Flow
 
 Source of truth for *what* to build: `docs/engram-development-spec.md`. Project rules: `CLAUDE.md`.
+Where code goes and what to call it: [`docs/conventions.md`](../conventions.md) (package home per workstream).
 This directory breaks P0 into workstreams sized for subagent execution.
 
 ## Flow: scaffold-first, then fan out

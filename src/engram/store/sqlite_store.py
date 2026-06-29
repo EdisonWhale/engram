@@ -315,16 +315,16 @@ class SQLiteMemoryStore:
         if not updates:
             return
 
-        _JSON_COLS = {"source_event_ids", "metadata"}
-        _DT_COLS = {"valid_from", "valid_until", "last_seen_at", "updated_at"}
+        json_cols = {"source_event_ids", "metadata"}
+        dt_cols = {"valid_from", "valid_until", "last_seen_at", "updated_at"}
 
         set_clauses = []
         params = []
         for col, val in updates.items():
-            db_col = f"{col}_json" if col in _JSON_COLS else col
-            if col in _JSON_COLS:
+            db_col = f"{col}_json" if col in json_cols else col
+            if col in json_cols:
                 val = _jdump(val)
-            elif col in _DT_COLS:
+            elif col in dt_cols:
                 val = _iso(val)
             set_clauses.append(f"{db_col} = ?")
             params.append(val)

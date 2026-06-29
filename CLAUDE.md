@@ -26,6 +26,7 @@ Follow the `karpathy-guidelines` skill (surgical changes, surface assumptions, v
 - **The natural seams are already in the spec**: `EventStore`, `MemoryStore`, `VectorStore`, `Retrieval`, `Consolidation`, and the MCP tool layer. Module boundaries go there; do not add layers inside them.
 - **Only the storage layer gets an interface upfront** (for the P2 Postgres swap). Everything else: write the concrete implementation first; extract an interface when a second implementation actually appears (YAGNI). E.g. no abstract base class for the reranker while there is one BM25 impl.
 - Prefer plain functions and `@dataclass`/pydantic models over class hierarchies. Reach for a class only when there is real state to encapsulate.
+- **Naming & layout conventions are pinned in [`docs/conventions.md`](docs/conventions.md)** — the single source of truth for where a file goes and what to call it (package homes per spec §7.1 component, identifier/table/migration/test/branch naming). Consult it before adding a file or package. Identifier naming is enforced by ruff `N` (pep8-naming).
 
 ## Toolchain
 

@@ -28,7 +28,8 @@ packages = ["src/engram"]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+# N = pep8-naming: enforces the naming conventions documented in docs/conventions.md.
+select = ["E", "F", "I", "UP", "B", "SIM", "N"]
 # B008: function call in default arg — acceptable for Pydantic Field(default_factory=...)
 # SIM117: nested with → not always clearer
 ignore = ["B008", "SIM117"]
