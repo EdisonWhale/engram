@@ -12,6 +12,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from engram.logging_config import setup_logging
+
 _DEFAULT_DB = Path.home() / ".engram" / "engram.db"
 
 
@@ -110,6 +112,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    setup_logging()
+
     parser = argparse.ArgumentParser(
         prog="engram",
         description="Cross-session memory MCP server for AI coding agents.",
