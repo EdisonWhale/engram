@@ -823,7 +823,7 @@ def test_build_session_summary_parses_llm_output():
 
 
 def test_build_session_summary_handles_bad_json():
-    """Malformed LLM output → graceful fallback (no crash)."""
+    """Malformed LLM output → None (no crash, no fabricated empty summary)."""
     from engram.consolidation.llm import MockLLMClient
     from engram.consolidation.summarize import build_session_summary
 
@@ -838,9 +838,26 @@ def test_build_session_summary_handles_bad_json():
     llm = MockLLMClient(canned="this is not json {{{ broken")
     summary = build_session_summary(session=session, events=[], llm=llm, hint="test hint")
 
-    assert summary is not None
-    # Fallback values populated, no crash
-    assert isinstance(summary.request, str)
+    # Unparseable output must not persist a fake summary — distinguishes
+    # "LLM failed" from "genuinely empty session".
+    assert summary is None
+
+
+def test_build_session_summary_empty_output_returns_none():
+    """Empty LLM output (e.g. no-key MockLLMClient) → None, not an empty summary."""
+    from engram.consolidation.llm import MockLLMClient
+    from engram.consolidation.summarize import build_session_summary
+
+    project = Project(root_path="/p3", name="p3")
+    session = AgentSession(
+        project_id=project.id,
+        external_session_id="e3",
+        memory_thread_id="t3",
+        agent="claude_code",
+    )
+
+    summary = build_session_summary(session=session, events=[], llm=MockLLMClient())
+    assert summary is None
 
 
 # ---------------------------------------------------------------------------

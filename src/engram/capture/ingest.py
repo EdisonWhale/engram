@@ -38,10 +38,19 @@ from engram.store.base import EventStore, MemoryStore
 # ---------------------------------------------------------------------------
 
 # event_types that represent "tool use starts" (need a matching result)
-_CALL_TYPES: frozenset[str] = frozenset({"tool_call", "git", "file_read", "file_edit"})
+# subagent_call is the Task-launch marker; its matching result is a "subagent"
+# event. Including it here means an interrupted subagent (launched, no result)
+# surfaces as a pending span instead of vanishing.
+_CALL_TYPES: frozenset[str] = frozenset(
+    {"tool_call", "git", "file_read", "file_edit", "subagent_call"}
+)
 
 # event_types that represent "tool use completed" (provide the matching result)
 _RESULT_TYPES: frozenset[str] = frozenset({"tool_result", "subagent"})
+
+# capture_confidence values that mean the source is NOT authoritative — their
+# presence makes completeness unprovable (spec §26: only Claude Code is exact).
+_NON_EXACT_CONFIDENCE: frozenset[str] = frozenset({"likely", "unknown"})
 
 
 # ---------------------------------------------------------------------------
@@ -159,33 +168,51 @@ def session_end(
     event_store: EventStore,
     session_id: str,
     summary_hint: str | None = None,  # noqa: ARG001 — reserved for WS-B consolidation
+    expected_max_seq: int | None = None,
 ) -> dict[str, Any]:
     """Close a session and run completeness reconciliation (spec §26).
 
     Completeness checks:
-      1. source_seq gap detection — any missing line numbers in the
-         [min, max] source_seq range indicate a dropped/unparseable record.
-      2. Pending-span detection — tool_call/git/file_read/file_edit events
-         with no matching tool_result/subagent event (interrupted spans).
+      1. source_seq gap detection — source_seq is 1-based (parse_transcript_lines),
+         so a missing number anywhere in [1, max] is a dropped/unparseable record.
+         Leading gaps (first line(s) lost) and, when ``expected_max_seq`` is
+         given, trailing gaps (last line(s) lost) are detected too — not just
+         interior gaps.
+      2. Pending-span detection — tool_call/git/file_read/file_edit/subagent_call
+         events with no matching tool_result/subagent event (interrupted spans).
+      3. Confidence — any non-exact event (Codex/Cursor, capture_confidence in
+         {likely, unknown}) makes completeness unprovable, so capture_complete
+         is forced False (spec §26: only Claude Code is authoritative).
+
+    ``expected_max_seq`` is the highest source_seq the producer emitted for this
+    session (the tailer knows it). Pass it to catch trailing drops; omit it and
+    only interior + leading gaps are detected.
 
     Returns a dict with:
-      session_id       – echoed back
-      status           – "completed" | "failed"
-      events_captured  – total number of events stored for this session
-      capture_complete – True only if no gaps AND no pending spans
-      gaps             – list of missing source_seq values (int)
-      pending_spans    – list of tool_use_ids with no matching result
+      session_id        – echoed back
+      status            – "completed" | "failed"
+      events_captured   – total number of events stored for this session
+      capture_complete  – True only if no gaps, no pending spans, all exact
+      gaps              – list of missing source_seq values (int)
+      pending_spans     – list of tool_use_ids with no matching result
+      capture_confidence – lowest confidence seen across the session's events
     """
     events = event_store.list_session_events(session_id)
 
-    # --- Gap detection on source_seq ---
+    # --- Gap detection on source_seq (1-based) ---
     source_seqs = sorted({e.source_seq for e in events if e.source_seq is not None})
     gaps: list[int] = []
     if source_seqs:
+        # Leading gap: 1-based numbering means anything below the first seq dropped.
+        gaps.extend(range(1, source_seqs[0]))
         for i in range(len(source_seqs) - 1):
             expected_next = source_seqs[i] + 1
             actual_next = source_seqs[i + 1]
             gaps.extend(range(expected_next, actual_next))
+        # Trailing gap: lines after the last observed seq, if the producer told
+        # us how many it emitted.
+        if expected_max_seq is not None and expected_max_seq > source_seqs[-1]:
+            gaps.extend(range(source_seqs[-1] + 1, expected_max_seq + 1))
 
     # --- Pending-span detection ---
     call_ids: set[str] = set()
@@ -200,7 +227,18 @@ def session_end(
             result_ids.add(uid)
     pending_spans = sorted(call_ids - result_ids)
 
-    capture_complete = len(gaps) == 0 and len(pending_spans) == 0
+    # --- Confidence: a single non-exact event makes completeness unprovable ---
+    confidences = {e.capture_confidence for e in events}
+    non_exact = confidences & _NON_EXACT_CONFIDENCE
+    # Lowest confidence wins: unknown < likely < exact.
+    if "unknown" in confidences:
+        lowest_confidence = "unknown"
+    elif "likely" in confidences:
+        lowest_confidence = "likely"
+    else:
+        lowest_confidence = "exact"
+
+    capture_complete = len(gaps) == 0 and len(pending_spans) == 0 and not non_exact
 
     # --- Update session status ---
     event_store.update_session_status(
@@ -216,6 +254,7 @@ def session_end(
         "capture_complete": capture_complete,
         "gaps": gaps,
         "pending_spans": pending_spans,
+        "capture_confidence": lowest_confidence,
     }
 
 

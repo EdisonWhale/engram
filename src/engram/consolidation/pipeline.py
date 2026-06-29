@@ -161,11 +161,17 @@ class ConsolidationWorker:
         ]
 
         if not items:
-            return {"sessions_processed": 0, "memories_created": 0, "summaries_created": 0}
+            return {
+                "sessions_processed": 0,
+                "sessions_failed": 0,
+                "memories_created": 0,
+                "summaries_created": 0,
+            }
 
         memories_created = 0
         summaries_created = 0
         processed_items: list[_QueueItem] = []
+        failed_session_ids: list[str] = []
 
         for item in items:
             try:
@@ -175,6 +181,7 @@ class ConsolidationWorker:
                 processed_items.append(item)
             except Exception:
                 logger.exception("Consolidation failed for session %s", item.session_id)
+                failed_session_ids.append(item.session_id)
 
         # Remove successfully processed items
         for item in processed_items:
@@ -190,6 +197,8 @@ class ConsolidationWorker:
 
         return {
             "sessions_processed": len(processed_items),
+            "sessions_failed": len(failed_session_ids),
+            "failed_session_ids": failed_session_ids,
             "memories_created": memories_created,
             "summaries_created": summaries_created,
         }
@@ -239,8 +248,10 @@ class ConsolidationWorker:
         # --- Session summary (LLM — idle-time only) ---
         if session is not None and events:
             summary = build_session_summary(session, events, self._llm)
-            self._memory_store.create_session_summary(summary)
-            summaries_created += 1
+            # None == LLM produced no usable output; do not persist a fake summary.
+            if summary is not None:
+                self._memory_store.create_session_summary(summary)
+                summaries_created += 1
 
         # --- Promote promotable events to long-term memories ---
         for event in events:
@@ -252,6 +263,16 @@ class ConsolidationWorker:
             title: str = str(event.payload.get("title") or reason.replace("_", " ").title())
 
             if not content:
+                # classify_event_for_promotion said this SHOULD become a memory,
+                # but the payload carries no content/summary — surface it instead
+                # of silently dropping an expected long-term memory.
+                logger.warning(
+                    "promotable event %s (%s, reason=%s) has empty content/summary; "
+                    "no memory created",
+                    event.id,
+                    event.event_type,
+                    reason,
+                )
                 continue
 
             content_hash = Memory.compute_hash(content)
@@ -297,6 +318,12 @@ class ConsolidationWorker:
             return
         existing = self._memory_store.get_memory(dedup.existing_memory_id)
         if existing is None:
+            # Raced: the dedup-referenced memory was deleted between the dedup
+            # check and now. The access_count bump is lost; leave a trace.
+            logger.debug(
+                "duplicate target memory %s no longer exists; access_count bump skipped",
+                dedup.existing_memory_id,
+            )
             return
         self._memory_store.update_memory(
             dedup.existing_memory_id,

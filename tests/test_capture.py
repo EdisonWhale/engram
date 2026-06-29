@@ -168,8 +168,9 @@ class TestClaudeCodeAdapter:
         events = adapter.process_record(record, byte_offset=400, source_seq=5)
         assert any(e.event_type == "file_edit" for e in events)
 
-    def test_task_call_produces_no_immediate_event(self):
-        """A Task call must be buffered until the result arrives."""
+    def test_task_call_emits_subagent_call_marker(self):
+        """A Task call emits a subagent_call marker (so an interrupted span is
+        detectable) but NOT yet the enriched subagent event."""
         adapter = ClaudeCodeAdapter()
         record = {
             "type": "assistant",
@@ -194,9 +195,13 @@ class TestClaudeCodeAdapter:
             },
         }
         events = adapter.process_record(record, byte_offset=500, source_seq=6)
-        # No subagent event yet — only possible assistant_summary for text
+        # The enriched subagent event only arrives with the result.
         assert not any(e.event_type == "subagent" for e in events)
-        assert not any(e.event_type == "tool_call" for e in events)
+        # But a call marker is emitted now so an interrupted Task is a pending span.
+        markers = [e for e in events if e.event_type == "subagent_call"]
+        assert len(markers) == 1
+        assert markers[0].payload["tool_use_id"] == "toolu_task_01"
+        assert markers[0].source_seq == 6
 
     # AC-3 ---------------------------------------------------------------
     def test_task_result_yields_subagent_event_with_metadata(self):
@@ -298,7 +303,9 @@ class TestClaudeCodeAdapter:
         assert len(events) == 1
         assert events[0].event_type == "permission"
 
-    def test_unknown_record_type_yields_no_events(self):
+    def test_unknown_record_type_yields_replayable_low_confidence_event(self):
+        """An unknown record type is stored as a low-confidence 'unknown' event
+        (raw events must stay replayable), not silently dropped."""
         adapter = ClaudeCodeAdapter()
         record = {
             "type": "unknown_future_type",
@@ -306,7 +313,11 @@ class TestClaudeCodeAdapter:
             "timestamp": "2024-01-15T10:00:00.000Z",
         }
         events = adapter.process_record(record, byte_offset=1000, source_seq=12)
-        assert events == []
+        assert len(events) == 1
+        assert events[0].event_type == "unknown"
+        assert events[0].capture_confidence == "unknown"
+        assert events[0].payload["record"] == record
+        assert events[0].source_seq == 12
 
     def test_raw_ref_offset_set_on_every_event(self):
         adapter = ClaudeCodeAdapter()
@@ -597,6 +608,77 @@ class TestGapDetection:
         result = session_end(event_store, session_id)
         assert result["capture_complete"] is True
         assert result["pending_spans"] == []
+
+    def test_leading_source_seq_gap_detected(self, stores, session_id):
+        """A dropped FIRST line (seq starts at 2) is a boundary gap, not silent."""
+        event_store, _ = stores
+        ts = datetime.now(UTC)
+        for i in (2, 3):  # seq 1 missing
+            record_event(
+                event_store,
+                session_id,
+                "user_prompt",
+                {"text": f"line {i}"},
+                source_seq=i,
+                occurred_at=ts,
+                source_type="transcript",
+            )
+        result = session_end(event_store, session_id)
+        assert result["capture_complete"] is False
+        assert 1 in result["gaps"], f"leading drop not detected: {result['gaps']}"
+
+    def test_trailing_source_seq_gap_detected_with_expected_max(self, stores, session_id):
+        """A dropped LAST line is detected when the producer reports expected_max_seq."""
+        event_store, _ = stores
+        ts = datetime.now(UTC)
+        for i in (1, 2):  # producer emitted up to seq 4; 3 and 4 dropped
+            record_event(
+                event_store,
+                session_id,
+                "user_prompt",
+                {"text": f"line {i}"},
+                source_seq=i,
+                occurred_at=ts,
+                source_type="transcript",
+            )
+        result = session_end(event_store, session_id, expected_max_seq=4)
+        assert result["capture_complete"] is False
+        assert 3 in result["gaps"] and 4 in result["gaps"]
+
+    def test_non_exact_confidence_forces_incomplete(self, stores, session_id):
+        """A single non-exact (Codex) event makes completeness unprovable."""
+        event_store, _ = stores
+        ts = datetime.now(UTC)
+        record_event(
+            event_store,
+            session_id,
+            "tool_call",
+            {"raw": "codex record"},
+            source_seq=1,
+            occurred_at=ts,
+            source_type="transcript",
+            capture_confidence="unknown",
+        )
+        result = session_end(event_store, session_id)
+        assert result["capture_complete"] is False
+        assert result["capture_confidence"] == "unknown"
+
+    def test_interrupted_subagent_is_pending_span(self, stores, session_id):
+        """A subagent_call with no matching subagent result → pending span."""
+        event_store, _ = stores
+        ts = datetime.now(UTC)
+        record_event(
+            event_store,
+            session_id,
+            "subagent_call",
+            {"tool_use_id": "task_dangling", "name": "Task", "input": {}},
+            source_seq=1,
+            occurred_at=ts,
+            source_type="transcript",
+        )
+        result = session_end(event_store, session_id)
+        assert result["capture_complete"] is False
+        assert "task_dangling" in result["pending_spans"]
 
 
 # ---------------------------------------------------------------------------

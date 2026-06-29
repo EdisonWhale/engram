@@ -38,11 +38,15 @@ def build_session_summary(
     events: list[Event],
     llm: LLMClient,
     hint: str | None = None,
-) -> SessionSummary:
+) -> SessionSummary | None:
     """Synthesize a SessionSummary from a completed session's events via LLM.
 
-    Gracefully falls back to empty/hint-derived values if the LLM returns
-    malformed JSON — a summary with missing fields is better than a crash.
+    Returns ``None`` when the LLM produced no usable output (empty string or
+    unparseable JSON — e.g. the no-API-key MockLLMClient, or a real API
+    failure).  The caller must NOT persist a summary in that case: a fabricated
+    "empty summary" is indistinguishable from a genuinely empty session and
+    silently pollutes storage.  A sparse-but-valid JSON object IS a real summary
+    and is returned as-is.
 
     Args:
         session: The AgentSession being summarised.
@@ -64,11 +68,24 @@ def build_session_summary(
 
     raw = llm.complete(prompt)
 
+    if not raw or not raw.strip():
+        logger.error(
+            "LLM returned empty output for session %s summary; skipping summary "
+            "(no API key / mock client, or upstream failure)",
+            session.id,
+        )
+        return None
+
     try:
         data: dict = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        logger.warning("LLM returned malformed JSON for session summary; using fallback")
-        data = {}
+        logger.error(
+            "LLM returned unparseable JSON for session %s summary; skipping summary. "
+            "Payload prefix: %r",
+            session.id,
+            raw[:200],
+        )
+        return None
 
     return SessionSummary(
         project_id=session.project_id,

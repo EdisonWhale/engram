@@ -120,6 +120,9 @@ def run_write_time_dedup(
     # When a store exists but no real embedding is available (P0 case), query
     # with an empty list — NullVectorStore returns [] (safe no-op), while a
     # FakeVectorStore with pre-configured distances works correctly in tests.
+    # NOTE (sfh #13, deferred to P1): a real embedding-based P1 store must reject
+    # an empty query vector — add the `embedding is None` guard when that store
+    # lands. Today the [] query is load-bearing for P0 conflict simulation.
     if vector_store is None:
         return DedupResult(action="insert")
 

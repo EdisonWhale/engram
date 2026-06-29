@@ -90,8 +90,12 @@ class TranscriptTailer:
 
             try:
                 data = _read_from_offset(jsonl_file, current_offset)
-            except OSError:
-                # File disappeared or is unreadable; skip this iteration.
+            except OSError as exc:
+                # File disappeared or is unreadable; skip this iteration. The
+                # offset is not advanced, so a transient error retries next pass;
+                # a persistent one (e.g. permissions) would otherwise drop a whole
+                # session silently — log it.
+                logger.warning("cannot read transcript %s: %s", jsonl_file, exc)
                 continue
 
             if not data:
@@ -112,7 +116,14 @@ class TranscriptTailer:
                     continue
                 byte_offset = new_offset
                 new_offset += len(line_bytes)
-                yield raw_line.decode(errors="replace"), jsonl_file, byte_offset
+                decoded = raw_line.decode(errors="replace")
+                if "�" in decoded:
+                    logger.warning(
+                        "invalid UTF-8 in %s at offset %d; bytes replaced with U+FFFD",
+                        jsonl_file,
+                        byte_offset,
+                    )
+                yield decoded, jsonl_file, byte_offset
 
             self._offsets[filename] = new_offset
             self._save_offsets()
@@ -127,13 +138,23 @@ class TranscriptTailer:
     # ------------------------------------------------------------------
 
     def _load_offsets(self) -> dict[str, int]:
+        # Missing file is the normal first-run case — silent. A file that EXISTS
+        # but is corrupt is abnormal: resetting to {} reprocesses every transcript
+        # from byte 0, and with no DB-level content_hash dedup that re-emits
+        # duplicate events. Surface it so the duplicate ingestion is explained.
         if not self._offset_store_path.exists():
             return {}
         try:
             with self._offset_store_path.open() as fh:
                 data = json.load(fh)
             return {k: int(v) for k, v in data.items()}
-        except (json.JSONDecodeError, OSError, ValueError):
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            logger.warning(
+                "offset store %s is corrupt (%s); resetting — transcripts will be "
+                "reprocessed and may produce duplicate events",
+                self._offset_store_path,
+                exc,
+            )
             return {}
 
     def _save_offsets(self) -> None:
@@ -141,9 +162,10 @@ class TranscriptTailer:
             self._offset_store_path.parent.mkdir(parents=True, exist_ok=True)
             with self._offset_store_path.open("w") as fh:
                 json.dump(self._offsets, fh)
-        except OSError:
-            # Best-effort; next run will reprocess from last saved offset.
-            pass
+        except OSError as exc:
+            # Best-effort; next run will reprocess from last saved offset (which
+            # can re-emit duplicates). Log so a persistent failure is visible.
+            logger.warning("could not persist offset store %s: %s", self._offset_store_path, exc)
 
 
 def parse_transcript_lines(

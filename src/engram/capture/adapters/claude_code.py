@@ -27,7 +27,8 @@ Event-type mapping (capture-schema.md §Mapping):
   tool_use  name=Bash, git  → git
   tool_use  name=Read       → file_read
   tool_use  name=Edit/Write → file_edit
-  tool_use  name=Task       → buffered; emitted as subagent when result arrives
+  tool_use  name=Task       → subagent_call marker now (so an interrupted span
+                              is detectable); enriched subagent event on result
   tool_use  other           → tool_call
   tool_result (non-Task)    → tool_result
   tool_use + tool_result
@@ -42,9 +43,12 @@ session to avoid cross-session bleed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -62,13 +66,15 @@ class ParsedEvent:
 class ClaudeCodeAdapter:
     """Stateful parser for Claude Code transcript JSONL records.
 
-    Call process_record() once per JSONL line, in order.  Call pending_task_ids()
-    at session_end to find Task calls that never received a result (interrupted spans).
+    Call process_record() once per JSONL line, in order.  A Task launch emits a
+    ``subagent_call`` marker immediately (so an interrupted subagent — launched
+    with no result — surfaces as a pending span at session_end) and an enriched
+    ``subagent`` event when its result arrives.
     """
 
     def __init__(self) -> None:
-        # Maps tool_use_id → tool_use content block for pending Task calls.
-        # Non-Task tool_use blocks are NOT buffered — they emit immediately.
+        # Maps tool_use_id → tool_use content block for in-flight Task calls,
+        # used only to enrich the result event with the original input.
         self._pending_tasks: dict[str, dict[str, Any]] = {}
 
     def process_record(
@@ -99,12 +105,25 @@ class ClaudeCodeAdapter:
                     )
                 ]
             case _:
-                # Unknown record type — build defensively; skip silently
-                return []
-
-    def pending_task_ids(self) -> list[str]:
-        """Return tool_use_ids for Task calls that have no matching result yet."""
-        return list(self._pending_tasks)
+                # Unknown record type — keep it replayable (raw events must stay
+                # replayable) and mark it low-confidence rather than dropping it
+                # silently, which would either vanish or look like a real gap.
+                logger.warning(
+                    "unknown Claude Code record type %r at source_seq=%d; "
+                    "stored as low-confidence 'unknown' event",
+                    record_type,
+                    source_seq,
+                )
+                return [
+                    ParsedEvent(
+                        event_type="unknown",
+                        payload={"record": record},
+                        occurred_at=ts,
+                        source_seq=source_seq,
+                        raw_ref_offset=byte_offset,
+                        capture_confidence="unknown",
+                    )
+                ]
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -186,9 +205,19 @@ class ClaudeCodeAdapter:
         inp = block.get("input") or {}
 
         if name == "Task":
-            # Buffer; emit when the matching result arrives.
+            # Buffer the input to enrich the result event, AND emit a call marker
+            # now so an interrupted subagent (no result) is a detectable pending
+            # span at session_end instead of vanishing without a gap.
             self._pending_tasks[tool_id] = block
-            return []
+            return [
+                ParsedEvent(
+                    event_type="subagent_call",
+                    payload={"tool_use_id": tool_id, "name": name, "input": inp},
+                    occurred_at=ts,
+                    source_seq=source_seq,
+                    raw_ref_offset=byte_offset,
+                )
+            ]
 
         event_type = _tool_use_event_type(name, inp)
         return [
@@ -294,4 +323,7 @@ def _parse_ts(ts_str: str) -> datetime:
         # Python 3.11+ handles 'Z' suffix via fromisoformat
         return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
     except ValueError:
+        # Fabricating "now" for a replayed old transcript misorders it by age —
+        # log so the substitution is visible rather than silent.
+        logger.warning("unparseable timestamp %r; substituting now(UTC)", ts_str)
         return datetime.now(UTC)

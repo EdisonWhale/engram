@@ -19,6 +19,7 @@ import or MCP ``initialize``, so the handshake never touches the filesystem.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,8 @@ from engram.retrieval import memory_get as retrieve_get
 from engram.retrieval import memory_search as retrieve_search
 from engram.retrieval import memory_timeline as retrieve_timeline
 from engram.store.sqlite_store import SQLiteEventStore, SQLiteMemoryStore
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP("engram")
 
@@ -71,8 +74,15 @@ def _build_state() -> _ServerState:
     event_store = SQLiteEventStore(conn)
     memory_store = SQLiteMemoryStore(conn)
     # Real LLM only when a key is configured; otherwise the server stays usable
-    # (capture + retrieval) and consolidation produces mock summaries.
-    llm = AnthropicLLMClient() if os.environ.get("ANTHROPIC_API_KEY") else MockLLMClient()
+    # (capture + retrieval) and consolidation produces no summaries.
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        llm = AnthropicLLMClient()
+    else:
+        logger.warning(
+            "ANTHROPIC_API_KEY not set; using MockLLMClient. Consolidation will "
+            "create NO session summaries (capture + retrieval still work)."
+        )
+        llm = MockLLMClient()
     worker = ConsolidationWorker(event_store=event_store, memory_store=memory_store, llm=llm)
     return _ServerState(event_store=event_store, memory_store=memory_store, worker=worker)
 
