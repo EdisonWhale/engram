@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Local / personal Claude config (keep shared settings.json + hooks committed)
+.claude/settings.local.json
+
+# OS
+.DS_Store
