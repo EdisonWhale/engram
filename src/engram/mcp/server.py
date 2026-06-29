@@ -1,40 +1,91 @@
-"""Engram MCP server — all tools registered as validated stubs.
+"""Engram MCP server — tools wired to the capture / consolidation / retrieval modules.
 
 Transport: stdio (ADR 0006).  No HTTP / no FastAPI / no Flask.
 
-Each tool:
-1. Defines pydantic input validation via a *Params model.
-2. Returns a typed placeholder dict (TypedDict) so callers know the schema.
-3. Contains a docstring explaining purpose and which workstream implements it.
+Each tool validates its input via a pydantic ``*Params`` model, then delegates to
+the workstream implementation through a lazily-built, process-wide ``_ServerState``
+(one SQLite connection + the three stores + the consolidation worker).
 
-Workstreams that fill in these stubs:
+Workstream ownership of the bodies:
 - WS-A (capture):       session_start, record_event, session_end
-- WS-B (consolidation): memory_consolidate, session_end (summary side)
-- WS-C (retrieval):     memory_search, memory_timeline, memory_get,
-                        memory_context, memory_list
-- WS-D (eval/mgmt):     memory_add, memory_update (plus eval runner)
+- WS-B (consolidation): memory_consolidate, session_end (flush side)
+- WS-C (retrieval):     memory_search, memory_timeline, memory_get, memory_context, memory_list
+- memory_add / memory_update: thin manual-admin store operations
+
+The database path comes from ``$ENGRAM_DB`` (set by ``engram --db PATH mcp``),
+defaulting to ``~/.engram/engram.db``.  State is built on first tool call, not at
+import or MCP ``initialize``, so the handshake never touches the filesystem.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
+from engram.capture import record_event as capture_record_event
+from engram.capture import session_end as capture_session_end
+from engram.capture import session_start as capture_session_start
+from engram.consolidation import AnthropicLLMClient, ConsolidationWorker, MockLLMClient
+from engram.db.runner import open_db
 from engram.models import (
     MemoryScope,
     MemoryStatus,
     MemoryType,
     UpdateOperation,
 )
+from engram.retrieval import memory_context as retrieve_context
+from engram.retrieval import memory_get as retrieve_get
+from engram.retrieval import memory_search as retrieve_search
+from engram.retrieval import memory_timeline as retrieve_timeline
+from engram.store.sqlite_store import SQLiteEventStore, SQLiteMemoryStore
 
 mcp = FastMCP("engram")
 
+
 # ---------------------------------------------------------------------------
-# Pydantic input models — used for explicit validation inside each stub.
-# FastMCP also validates via type annotations; these models provide a clear
-# contract for callers and enable direct unit-testing of validation logic.
+# Process-wide state (lazy): one connection, the stores, the worker.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ServerState:
+    event_store: SQLiteEventStore
+    memory_store: SQLiteMemoryStore
+    worker: ConsolidationWorker
+
+
+_state: _ServerState | None = None
+
+
+def _resolve_db_path() -> str:
+    return os.environ.get("ENGRAM_DB") or str(Path.home() / ".engram" / "engram.db")
+
+
+def _build_state() -> _ServerState:
+    conn = open_db(_resolve_db_path())
+    event_store = SQLiteEventStore(conn)
+    memory_store = SQLiteMemoryStore(conn)
+    # Real LLM only when a key is configured; otherwise the server stays usable
+    # (capture + retrieval) and consolidation produces mock summaries.
+    llm = AnthropicLLMClient() if os.environ.get("ANTHROPIC_API_KEY") else MockLLMClient()
+    worker = ConsolidationWorker(event_store=event_store, memory_store=memory_store, llm=llm)
+    return _ServerState(event_store=event_store, memory_store=memory_store, worker=worker)
+
+
+def _get_state() -> _ServerState:
+    global _state
+    if _state is None:
+        _state = _build_state()
+    return _state
+
+
+# ---------------------------------------------------------------------------
+# Pydantic input models — explicit validation, directly unit-testable.
 # ---------------------------------------------------------------------------
 
 
@@ -78,6 +129,7 @@ class MemoryGetParams(BaseModel):
 
 class MemoryContextParams(BaseModel):
     query: str
+    project: str | None = None
     token_budget: int = Field(default=1200, ge=100, le=8000)
 
 
@@ -86,6 +138,7 @@ class MemoryAddParams(BaseModel):
     type: MemoryType
     scope: MemoryScope
     project: str | None = None
+    title: str | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -108,7 +161,7 @@ class MemoryConsolidateParams(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Session tools  (WS-A implements the bodies)
+# Session tools  (WS-A)
 # ---------------------------------------------------------------------------
 
 
@@ -120,30 +173,24 @@ def session_start(
     git_sha: str,
     branch: str,
 ) -> dict[str, Any]:
-    """Create or resume an agent session and return initial memory context.
+    """Create or resume an agent session.
 
-    Resolves or mints a memory_thread_id using the active task_context rules
-    (spec §9.2).  Returns the session id and any relevant prior memories for
-    the agent to inject at the start of a new session.
-
-    Implemented by WS-A.
+    Resolves or mints a memory_thread_id from the active task_context rules
+    (spec §9.2) and returns the session id and thread.
     """
     params = SessionStartParams(
-        project_path=project_path,
-        agent=agent,
-        prompt=prompt,
-        git_sha=git_sha,
-        branch=branch,
+        project_path=project_path, agent=agent, prompt=prompt, git_sha=git_sha, branch=branch
     )
-    return {
-        "session_id": "stub",
-        "memory_thread_id": "stub",
-        "thread_ambiguous": False,
-        "context": "",
-        "project_id": "stub",
-        # Echo validated params so callers can see what was accepted
-        "_params": params.model_dump(),
-    }
+    st = _get_state()
+    return capture_session_start(
+        st.event_store,
+        st.memory_store,
+        params.project_path,
+        params.agent,
+        params.prompt,
+        params.git_sha,
+        params.branch,
+    )
 
 
 @mcp.tool()
@@ -152,52 +199,54 @@ def record_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Append a normalised raw event to the session's event log.
+    """Append a normalised raw event to the session's event log (append-only, ADR 0004).
 
-    Events are append-only (ADR 0004).  The capture workstream computes
-    seq, content_hash, and raw_ref fields before delegating to the EventStore.
-
-    Implemented by WS-A.
+    The event is also enqueued for lazy consolidation (flushed at session_end or
+    via memory_consolidate).
     """
-    params = RecordEventParams(
-        session_id=session_id,
-        event_type=event_type,
-        payload=payload or {},
+    params = RecordEventParams(session_id=session_id, event_type=event_type, payload=payload or {})
+    st = _get_state()
+    event = capture_record_event(
+        st.event_store, params.session_id, params.event_type, params.payload, source_type="mcp"
     )
+    if event is None:
+        return {"recorded": False, "reason": "session_not_found", "session_id": params.session_id}
+    st.worker.enqueue_event(event.session_id, event.project_id, event.id)
     return {
-        "event_id": "stub",
-        "seq": 0,
-        "content_hash": "stub",
-        "_params": params.model_dump(),
+        "recorded": True,
+        "event_id": event.id,
+        "seq": event.seq,
+        "content_hash": event.content_hash,
     }
 
 
 @mcp.tool()
-def session_end(
+async def session_end(
     session_id: str,
     summary_hint: str | None = None,
 ) -> dict[str, Any]:
-    """Close a session, write a summary, and queue consolidation.
+    """Close a session, reconcile capture completeness (ADR 0004), then flush consolidation.
 
-    Updates session status to 'completed', persists a SessionSummary, and
-    queues long-term memory candidates for the consolidation worker (WS-B).
-    Runs sequence-gap reconciliation (ADR 0004).
-
-    Implemented by WS-A (close/summary) and WS-B (consolidation queue).
+    The capture close (WS-A) always runs.  Consolidation (WS-B) only runs for a
+    completely-captured session; its outcome is reported under ``consolidation``
+    and a consolidation failure does not fail the session close.
     """
     params = SessionEndParams(session_id=session_id, summary_hint=summary_hint)
-    return {
-        "session_id": params.session_id,
-        "status": "completed",
-        "summary_id": "stub",
-        "events_captured": 0,
-        "capture_complete": True,
-        "_params": params.model_dump(),
-    }
+    st = _get_state()
+    result = capture_session_end(st.event_store, params.session_id, params.summary_hint)
+
+    if result.get("capture_complete"):
+        try:
+            result["consolidation"] = await st.worker.run_once(session_id=params.session_id)
+        except Exception as exc:  # noqa: BLE001 — surfaced to caller, not swallowed
+            result["consolidation_error"] = f"{type(exc).__name__}: {exc}"
+    else:
+        result["consolidation"] = {"skipped": "capture_incomplete"}
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Retrieval tools  (WS-C implements the bodies)
+# Retrieval tools  (WS-C)
 # ---------------------------------------------------------------------------
 
 
@@ -209,20 +258,17 @@ def memory_search(
     type: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
-    """Return a compact candidate index: IDs, titles, type, age, status, provenance.
-
-    Stage 1 of the progressive-disclosure workflow (spec §11.2).
-    Agents should inspect these lightweight rows before calling memory_get.
-
-    Implemented by WS-C.
-    """
+    """Stage 1 progressive disclosure (spec §11.2): compact candidate rows (id/title/type/age)."""
     params = MemorySearchParams(query=query, project=project, file=file, type=type, limit=limit)
-    return {
-        "memories": [],
-        "total": 0,
-        "query": params.query,
-        "_params": params.model_dump(),
-    }
+    st = _get_state()
+    return retrieve_search(
+        params.query,
+        memory_store=st.memory_store,
+        project_id=params.project,
+        file_path=params.file,
+        type=params.type,
+        limit=params.limit,
+    )
 
 
 @mcp.tool()
@@ -232,63 +278,48 @@ def memory_timeline(
     before: int = 3,
     after: int = 3,
 ) -> dict[str, Any]:
-    """Return chronological context surrounding a memory or query match.
-
-    Stage 2 of the progressive-disclosure workflow.  Useful for understanding
-    what happened before and after a specific decision or event.
-
-    Implemented by WS-C.
-    """
+    """Stage 2 progressive disclosure: chronological window around an anchor/query match."""
     params = MemoryTimelineParams(anchor_id=anchor_id, query=query, before=before, after=after)
-    return {
-        "anchor": None,
-        "before": [],
-        "after": [],
-        "_params": params.model_dump(),
-    }
+    st = _get_state()
+    return retrieve_timeline(
+        memory_store=st.memory_store,
+        anchor_id=params.anchor_id,
+        query=params.query,
+        before=params.before,
+        after=params.after,
+    )
 
 
 @mcp.tool()
 def memory_get(ids: list[str]) -> dict[str, Any]:
-    """Fetch full memory records for a specific set of IDs.
-
-    Stage 3 of the progressive-disclosure workflow — only call after
-    filtering candidates with memory_search / memory_timeline.
-
-    Implemented by WS-C.
-    """
+    """Stage 3 progressive disclosure: full memory records for specific IDs."""
     params = MemoryGetParams(ids=ids)
-    return {
-        "memories": [],
-        "not_found": [],
-        "_params": params.model_dump(),
-    }
+    st = _get_state()
+    return retrieve_get(params.ids, memory_store=st.memory_store)
 
 
 @mcp.tool()
 def memory_context(
     query: str,
+    project: str | None = None,
     token_budget: int = 1200,
 ) -> dict[str, Any]:
-    """Return final prompt-ready context assembled under a token budget.
+    """Final prompt-ready context under a token budget (§11.3).
 
-    Combines short-term task context + ranked long-term memories into an
-    injectable string.  Does not inject stale, conflicting, or deleted memories.
-
-    Implemented by WS-C.
+    Never injects stale, conflicting, or deleted memories.
     """
-    params = MemoryContextParams(query=query, token_budget=token_budget)
-    return {
-        "context": "",
-        "injected_tokens": 0,
-        "memory_ids": [],
-        "trace_id": "stub",
-        "_params": params.model_dump(),
-    }
+    params = MemoryContextParams(query=query, project=project, token_budget=token_budget)
+    st = _get_state()
+    return retrieve_context(
+        params.query,
+        memory_store=st.memory_store,
+        project_id=params.project,
+        token_budget=params.token_budget,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Memory management tools  (WS-D / manual use)
+# Memory management tools
 # ---------------------------------------------------------------------------
 
 
@@ -298,23 +329,24 @@ def memory_add(
     type: str,
     scope: str,
     project: str | None = None,
+    title: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Manually insert a confirmed fact, preference, or decision as a memory.
+    """Manually insert a confirmed fact/preference/decision.
 
-    Performs exact-match dedup via content_hash before insert.
-    Valid type: preference | decision | project_fact | failure_pattern | command | constraint.
-    Valid scope: user | project | session.
-
-    Implemented by WS-D.
+    Input is validated, but the body is intentionally not implemented: no
+    workstream specs manual memory creation, and the data model requires a
+    resolved project_id plus a defined user-scope handling that needs a spec
+    decision before encoding (see docs/tasks). Validation still runs so callers
+    get correct type/scope errors today.
     """
     params = MemoryAddParams(
-        content=content, type=type, scope=scope, project=project, metadata=metadata
+        content=content, type=type, scope=scope, project=project, title=title, metadata=metadata
     )
     return {
-        "memory_id": "stub",
-        "deduplicated": False,
-        "_params": params.model_dump(),
+        "implemented": False,
+        "reason": "manual memory_add not yet specced (project_id resolution + user-scope)",
+        "validated": params.model_dump(mode="json"),
     }
 
 
@@ -325,25 +357,20 @@ def memory_update(
     content: str | None = None,
     reason: str | None = None,
 ) -> dict[str, Any]:
-    """Update a memory's status via a named operation.
+    """Update a memory's lifecycle status (supersede/stale/tombstone, never hard-delete).
 
-    Valid operations:
-    - supersede: mark old memory superseded and link a replacement.
-    - mark_stale: reduce confidence; surface as stale.
-    - resolve_conflict: pick one of two conflicting memories as canonical.
-    - delete: soft-delete (tombstone); does not hard-delete by default.
-    - reinforce: bump access_count and last_seen_at.
-
-    Implemented by WS-D.
+    Input is validated, but the body is intentionally not implemented: the manual
+    update semantics (esp. supersede/resolve_conflict, which mutate two rows and
+    set forward pointers) overlap the WS-B consolidation state machine and need a
+    spec decision on the manual-vs-automatic boundary before encoding.
     """
     params = MemoryUpdateParams(
         memory_id=memory_id, operation=operation, content=content, reason=reason
     )
     return {
-        "memory_id": params.memory_id,
-        "operation": params.operation,
-        "success": True,
-        "_params": params.model_dump(),
+        "implemented": False,
+        "reason": "manual memory_update not yet specced (overlaps WS-B supersede/conflict path)",
+        "validated": params.model_dump(mode="json"),
     }
 
 
@@ -353,48 +380,30 @@ def memory_list(
     type: str | None = None,
     status: str | None = None,
 ) -> dict[str, Any]:
-    """List memories for inspection and admin use.
-
-    Valid status values: active | stale | superseded | conflict | deleted.
-
-    Implemented by WS-C.
-    """
+    """List memories for inspection/admin. status: active|stale|superseded|conflict|deleted."""
     params = MemoryListParams(project=project, type=type, status=status)
-    return {
-        "memories": [],
-        "total": 0,
-        "_params": params.model_dump(),
-    }
+    st = _get_state()
+    memories = st.memory_store.list_memories(
+        project_id=params.project, type=params.type, status=params.status
+    )
+    return {"memories": [m.model_dump(mode="json") for m in memories], "total": len(memories)}
 
 
 @mcp.tool()
-def memory_consolidate(
+async def memory_consolidate(
     project: str | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Manually trigger the consolidation worker for a project or session.
-
-    Consolidation is normally queued at session_end; this tool forces it
-    immediately.  No LLM calls are made on the capture path (ADR 0003).
-
-    Implemented by WS-B.
-    """
+    """Manually run the consolidation worker for a project or session (no LLM on write path)."""
     params = MemoryConsolidateParams(project=project, session_id=session_id)
-    return {
-        "queued": True,
-        "scope": {"project": params.project, "session_id": params.session_id},
-        "_params": params.model_dump(),
-    }
+    st = _get_state()
+    result = await st.worker.run_once(project_id=params.project, session_id=params.session_id)
+    return {"scope": {"project": params.project, "session_id": params.session_id}, **result}
 
 
 # ---------------------------------------------------------------------------
 # Entry point — called by the CLI's `engram mcp` subcommand
 # ---------------------------------------------------------------------------
-
-# All 11 tools registered:
-# session_start, record_event, session_end,
-# memory_search, memory_timeline, memory_get, memory_context,
-# memory_add, memory_update, memory_list, memory_consolidate
 
 _EXPECTED_TOOLS: frozenset[str] = frozenset(
     {
@@ -411,5 +420,3 @@ _EXPECTED_TOOLS: frozenset[str] = frozenset(
         "memory_consolidate",
     }
 )
-
-Literal["all tools registered"]  # sentinel for static analysers

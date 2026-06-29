@@ -488,13 +488,13 @@ def memory_context(
     # Exclude: conflict (never inject unresolved), superseded, deleted,   #
     #          freshly-staled memories (demoted, not injected by default). #
     # ------------------------------------------------------------------ #
-    _INJECTABLE = {"active"}
+    injectable_statuses = {"active"}
     conflict_excluded: list[str] = []
     safe: list[Memory] = []
     for m in checked:
         if m.status == "conflict":
             conflict_excluded.append(m.id)
-        elif m.status in _INJECTABLE:
+        elif m.status in injectable_statuses:
             safe.append(m)
     trace.conflict_ids_excluded = conflict_excluded
 

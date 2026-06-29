@@ -162,6 +162,22 @@ class MemoryStore(Protocol):
         """Return all active (non-expired, non-completed) task contexts for a project."""
         ...
 
+    def list_task_contexts(self, project_id: str, status: str | None = None) -> list[TaskContext]:
+        """List task contexts for a project, optionally filtered by status.
+
+        Unlike list_active_task_contexts this does NOT apply a TTL filter, so
+        callers (e.g. consolidation's expiry sweep) can find past-TTL rows that
+        are still marked active and update them.
+        """
+        ...
+
+    def update_task_context(self, task_id: str, updates: dict[str, Any]) -> None:
+        """Apply a partial update dict to a task_context row (status, ttl, etc.).
+
+        Used to clear a context on task completion or mark it expired.
+        """
+        ...
+
     # --- session_summaries ---
 
     def create_session_summary(self, summary: SessionSummary) -> SessionSummary:

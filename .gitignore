@@ -15,6 +15,10 @@ venv/
 
 # Local / personal Claude config (keep shared settings.json + hooks committed)
 .claude/settings.local.json
+.claude/worktrees/
+
+# CodeGraph index (rebuildable; per-developer)
+.codegraph/
 
 # OS
 .DS_Store

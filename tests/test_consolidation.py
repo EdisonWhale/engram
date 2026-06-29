@@ -152,7 +152,13 @@ class FakeMemoryStore:
             and (ctx.ttl_until is None or ctx.ttl_until > now)
         ]
 
-    # Extension beyond frozen Protocol (reported as open question in WS-B report)
+    def list_task_contexts(self, project_id: str, status: str | None = None) -> list[TaskContext]:
+        return [
+            ctx
+            for ctx in self._task_contexts.values()
+            if ctx.project_id == project_id and (status is None or ctx.status == status)
+        ]
+
     def update_task_context(self, task_id: str, updates: dict[str, Any]) -> None:
         ctx = self._task_contexts.get(task_id)
         if ctx:

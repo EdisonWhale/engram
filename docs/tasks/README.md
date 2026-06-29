@@ -43,8 +43,16 @@ WS-0  Scaffold & Contract   (1 agent, sequential, BLOCKING)   -> 00-scaffold.md
 
 | WS | Title | Depends on | Status |
 |----|-------|-----------|--------|
-| 0 | Scaffold & Contract | — | not started |
-| A | Capture | WS-0 | blocked |
-| B | Consolidation | WS-0 | blocked |
-| C | Retrieval | WS-0 | blocked |
-| D | Evals & Traces | WS-0, WS-C | blocked |
+| 0 | Scaffold & Contract | — | done (merged) |
+| A | Capture | WS-0 | done — integrated + server-wired |
+| B | Consolidation | WS-0 | done — integrated + server-wired |
+| C | Retrieval | WS-0 | done — integrated + server-wired |
+| D | Evals & Traces | WS-0, WS-C | unblocked (next) |
+
+**Integration notes (P0):** A/B/C built in parallel worktrees (Sonnet 4.6), merged onto `p0-integration`,
+MCP `server.py` wired to all three. Contract extensions added during integration:
+`MemoryStore.search_memories_fts` (WS-C, BM25), `MemoryStore.list_task_contexts` + `update_task_context`
+(closes WS-B's task-context gap). Deferred / needs a spec decision before building:
+`memory_add` / `memory_update` tool bodies (no workstream specs manual create/update; validation-only stubs),
+the consolidation idle background loop (needs FastMCP lifespan wiring — manual + session_end flush works now),
+and `ScoredVectorStore.search_with_scores` staying consolidation-owned until P1 embeddings land.

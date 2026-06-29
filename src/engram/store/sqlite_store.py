@@ -420,8 +420,10 @@ class SQLiteMemoryStore:
                 """,
                 params,
             ).fetchall()
-        except Exception:
-            # FTS5 syntax error from user input — return empty rather than crash
+        except sqlite3.OperationalError:
+            # Malformed FTS5 MATCH expression from user input (despite
+            # sanitization) — degrade to no results rather than crash. Other
+            # error classes (programming/integrity/DB) propagate.
             return []
 
         return [_row_to_memory(r) for r in rows]
@@ -472,6 +474,49 @@ class SQLiteMemoryStore:
             (project_id,),
         ).fetchall()
         return [_row_to_task_context(r) for r in rows]
+
+    def list_task_contexts(self, project_id: str, status: str | None = None) -> list[TaskContext]:
+        if status is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM task_contexts WHERE project_id = ? AND status = ? "
+                "ORDER BY created_at DESC",
+                (project_id, status),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM task_contexts WHERE project_id = ? ORDER BY created_at DESC",
+                (project_id,),
+            ).fetchall()
+        return [_row_to_task_context(r) for r in rows]
+
+    def update_task_context(self, task_id: str, updates: dict[str, Any]) -> None:
+        if not updates:
+            return
+
+        dt_cols = {"ttl_until", "updated_at"}
+        json_cols = {"changed_files", "next_steps", "source_event_ids"}
+
+        set_clauses = []
+        params: list[Any] = []
+        for col, val in updates.items():
+            db_col = f"{col}_json" if col in json_cols else col
+            if col in json_cols:
+                val = _jdump(val)
+            elif col in dt_cols:
+                val = _iso(val)
+            set_clauses.append(f"{db_col} = ?")
+            params.append(val)
+
+        if "updated_at" not in updates:
+            set_clauses.append("updated_at = ?")
+            params.append(_iso(datetime.now(UTC)))
+
+        params.append(task_id)
+        self._conn.execute(
+            f"UPDATE task_contexts SET {', '.join(set_clauses)} WHERE id = ?",
+            params,
+        )
+        self._conn.commit()
 
     # --- session_summaries ---
 

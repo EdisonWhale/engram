@@ -13,26 +13,11 @@ import asyncio
 import json
 import subprocess
 import sys
-from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-from engram.mcp.server import (
-    _EXPECTED_TOOLS,
-    mcp,
-    memory_add,
-    memory_consolidate,
-    memory_context,
-    memory_get,
-    memory_list,
-    memory_search,
-    memory_timeline,
-    memory_update,
-    record_event,
-    session_end,
-    session_start,
-)
+from engram.mcp.server import _EXPECTED_TOOLS, mcp
 
 # ---------------------------------------------------------------------------
 # Registration check
@@ -55,101 +40,99 @@ def test_tool_count() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Direct invocation — stubs return dicts, don't raise
+# Direct invocation — tools wired to an isolated temp DB
 # ---------------------------------------------------------------------------
 
 
-def _check_stub(result: Any) -> None:
-    """Stubs must return a dict."""
-    assert isinstance(result, dict), f"expected dict, got {type(result)}"
+@pytest.fixture
+def wired(tmp_path, monkeypatch):
+    """Point the server at a throwaway DB and force the mock LLM, then reset state."""
+    import engram.mcp.server as srv
+
+    monkeypatch.setenv("ENGRAM_DB", str(tmp_path / "engram.db"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)  # → MockLLMClient
+    monkeypatch.setattr(srv, "_state", None)
+    yield srv
+    monkeypatch.setattr(srv, "_state", None)
 
 
-def test_session_start_stub() -> None:
-    r = session_start(".", "claude_code", "continue evals", "abc123", "main")
-    _check_stub(r)
-    assert "session_id" in r
+def _start_session(srv) -> str:
+    r = srv.session_start(
+        str(srv._resolve_db_path()), "claude_code", "continue evals", "sha", "main"
+    )
+    return r["session_id"]
+
+
+def test_session_start_creates_session(wired) -> None:
+    r = wired.session_start(".", "claude_code", "continue evals", "abc123", "main")
+    assert isinstance(r, dict)
+    assert r["session_id"] and r["project_id"]
     assert "memory_thread_id" in r
 
 
-def test_record_event_stub() -> None:
-    r = record_event("sess-1", "tool_call", {"cmd": "pytest"})
-    _check_stub(r)
-    assert "event_id" in r
-    assert "seq" in r
+def test_record_event_appends_and_reports_seq(wired) -> None:
+    session_id = _start_session(wired)
+    r = wired.record_event(session_id, "tool_call", {"cmd": "pytest"})
+    assert r["recorded"] is True
+    assert r["seq"] >= 1
+    assert r["content_hash"]
 
 
-def test_record_event_no_payload() -> None:
-    r = record_event("sess-1", "user_prompt")
-    _check_stub(r)
+def test_record_event_unknown_session(wired) -> None:
+    r = wired.record_event("does-not-exist", "user_prompt")
+    assert r["recorded"] is False
+    assert r["reason"] == "session_not_found"
 
 
-def test_session_end_stub() -> None:
-    r = session_end("sess-1")
-    _check_stub(r)
-    assert "status" in r
+def test_session_end_reconciles_and_consolidates(wired) -> None:
+    import asyncio
+
+    session_id = _start_session(wired)
+    wired.record_event(session_id, "user_prompt", {"text": "hi"})
+    r = asyncio.run(wired.session_end(session_id))
+    assert r["status"] == "completed"
+    assert r["capture_complete"] is True
+    assert "consolidation" in r  # flush ran, no consolidation_error
+    assert "consolidation_error" not in r
 
 
-def test_session_end_with_hint() -> None:
-    r = session_end("sess-1", "next: implement MRR")
-    _check_stub(r)
+def test_memory_search_empty_db(wired) -> None:
+    r = wired.memory_search("continue the eval work")
+    assert r["memories"] == [] and r["total"] == 0
 
 
-def test_memory_search_stub() -> None:
-    r = memory_search("continue the eval work")
-    _check_stub(r)
-    assert "memories" in r
+def test_memory_get_not_found(wired) -> None:
+    r = wired.memory_get(["mem-1", "mem-2"])
+    assert r["memories"] == []
+    assert set(r["not_found"]) == {"mem-1", "mem-2"}
 
 
-def test_memory_search_with_filters() -> None:
-    r = memory_search("SQLite", project="proj-1", type="decision", limit=5)
-    _check_stub(r)
-
-
-def test_memory_timeline_stub() -> None:
-    r = memory_timeline(anchor_id="mem-1", before=2, after=2)
-    _check_stub(r)
-
-
-def test_memory_timeline_query() -> None:
-    r = memory_timeline(query="eval runner")
-    _check_stub(r)
-
-
-def test_memory_get_stub() -> None:
-    r = memory_get(["mem-1", "mem-2"])
-    _check_stub(r)
-    assert "memories" in r
-
-
-def test_memory_context_stub() -> None:
-    r = memory_context("continue the eval work", token_budget=800)
-    _check_stub(r)
+def test_memory_context_empty_respects_budget(wired) -> None:
+    r = wired.memory_context("continue the eval work", token_budget=800)
+    assert r["injected_tokens"] <= 800
     assert "context" in r
-    assert "injected_tokens" in r
 
 
-def test_memory_add_stub() -> None:
-    r = memory_add("Prefer SQLite", "decision", "project")
-    _check_stub(r)
-    assert "memory_id" in r
+def test_memory_list_empty(wired) -> None:
+    r = wired.memory_list(status="active")
+    assert r["memories"] == [] and r["total"] == 0
 
 
-def test_memory_update_stub() -> None:
-    r = memory_update("mem-1", "mark_stale", reason="file changed")
-    _check_stub(r)
-    assert r["success"] is True
+def test_memory_consolidate_runs(wired) -> None:
+    import asyncio
+
+    r = asyncio.run(wired.memory_consolidate(project=None, session_id=None))
+    assert "sessions_processed" in r
 
 
-def test_memory_list_stub() -> None:
-    r = memory_list(status="active")
-    _check_stub(r)
-    assert "memories" in r
+def test_memory_add_not_implemented(wired) -> None:
+    r = wired.memory_add("Prefer SQLite", "decision", "project")
+    assert r["implemented"] is False
 
 
-def test_memory_consolidate_stub() -> None:
-    r = memory_consolidate(project="proj-1")
-    _check_stub(r)
-    assert r["queued"] is True
+def test_memory_update_not_implemented(wired) -> None:
+    r = wired.memory_update("mem-1", "mark_stale", reason="file changed")
+    assert r["implemented"] is False
 
 
 # ---------------------------------------------------------------------------
