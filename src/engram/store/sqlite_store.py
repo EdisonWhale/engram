@@ -19,6 +19,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any
@@ -73,6 +74,30 @@ def _jdump(value: Any) -> str:
 
 def _jload(value: str) -> Any:
     return json.loads(value)
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Convert a raw user query into a safe FTS5 MATCH expression.
+
+    FTS5 special characters and common path separators (/ .) are stripped so
+    that identifiers like "src/engram/__init__.py" or "E-0203" are split into
+    individual word tokens before matching.  This mirrors how the FTS5
+    unicode61 tokenizer splits content, ensuring queries on file paths and
+    error codes find their corresponding indexed tokens.
+
+    Tokens are joined with OR so BM25 naturally scores documents that contain
+    more matching terms higher.
+
+    Returns an empty string if no tokens survive sanitization.
+    """
+    # Strip FTS5 operators and common path/identifier separators
+    clean = re.sub(r'[-"*^~(){}[\]:@/.]', " ", query)
+    tokens = [t.strip() for t in clean.split() if t.strip()]
+    if not tokens:
+        return ""
+    if len(tokens) == 1:
+        return tokens[0]
+    return " OR ".join(tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +365,66 @@ class SQLiteMemoryStore:
             params,
         )
         self._conn.commit()
+
+    def search_memories_fts(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+        type: str | None = None,
+        status: str | None = None,
+        file_path: str | None = None,
+        limit: int = 20,
+    ) -> list[Memory]:
+        """BM25 full-text search over memories title + content via the FTS5 index.
+
+        FTS5 bm25() returns negative floats; ORDER BY ASC puts best matches first.
+        The memories_fts virtual table is a content table backed by the memories
+        table, so we JOIN on rowid to get full memory rows.
+
+        Returns an empty list (rather than raising) if the sanitized query is
+        empty or produces no FTS matches.
+        """
+        fts_query = _sanitize_fts_query(query)
+        if not fts_query:
+            return []
+
+        clauses: list[str] = []
+        params: list[Any] = [fts_query]
+
+        if project_id is not None:
+            clauses.append("m.project_id = ?")
+            params.append(project_id)
+        if type is not None:
+            clauses.append("m.type = ?")
+            params.append(type)
+        if status is not None:
+            clauses.append("m.status = ?")
+            params.append(status)
+        if file_path is not None:
+            clauses.append("m.file_path = ?")
+            params.append(file_path)
+
+        extra = (" AND " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+
+        try:
+            rows = self._conn.execute(
+                f"""
+                SELECT m.*
+                FROM memories_fts
+                JOIN memories m ON m.rowid = memories_fts.rowid
+                WHERE memories_fts MATCH ?{extra}
+                ORDER BY bm25(memories_fts) ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        except Exception:
+            # FTS5 syntax error from user input — return empty rather than crash
+            return []
+
+        return [_row_to_memory(r) for r in rows]
 
     # --- task_contexts ---
 

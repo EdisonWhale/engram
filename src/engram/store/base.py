@@ -126,6 +126,28 @@ class MemoryStore(Protocol):
         """Apply a partial update dict to a memory row (status, confidence, etc.)."""
         ...
 
+    def search_memories_fts(
+        self,
+        query: str,
+        *,
+        project_id: str | None = None,
+        type: str | None = None,
+        status: str | None = None,
+        file_path: str | None = None,
+        limit: int = 20,
+    ) -> list[Memory]:
+        """BM25 full-text search over memory title + content via FTS5.
+
+        Returns memories ranked best-first by BM25 score.  FTS5's bm25()
+        returns negative floats; lower (more negative) means a better match.
+
+        Metadata filters (project_id, type, status, file_path) are applied
+        as additional WHERE clauses so the result set is already scoped before
+        ranking.  Callers should pass ``status="active"`` for retrieval use-cases
+        and leave it None for admin/debug inspection.
+        """
+        ...
+
     # --- task_contexts ---
 
     def create_task_context(self, ctx: TaskContext) -> TaskContext:
