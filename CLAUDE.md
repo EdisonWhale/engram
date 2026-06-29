@@ -38,8 +38,8 @@ Follow the `karpathy-guidelines` skill (surgical changes, surface assumptions, v
 
 - **Subagents return diffs; they do not commit or merge.** The main agent is the integration point.
 - **Auto commit + push is the main agent's job, gated on verification.** After a subagent's work passes review (`/code-review` + `silent-failure-hunter`, `/security-review` where privacy/secret code changed) AND `ruff check` + `pytest` are green, the main agent may commit and push **without asking** — but to a **per-workstream feature branch** (e.g. `ws-a-capture`), then open a PR. **Never auto-commit or push to `main`.** Verification is the gate; if review or tests fail, do not commit.
-- **Spawn parallel coding subagents in `acceptEdits` mode** so in-project file edits don't prompt, but genuinely dangerous ops (rm, network, non-allowlisted commands) still stop. Do **not** use `bypassPermissions` — it auto-approves destructive commands.
-- The allowlist in `.claude/settings.json` (ruff/pytest/git/gh/codegraph) is what lets commit+push proceed without prompting. Adjust it there.
+- **Autonomous build subagents run in `bypassPermissions` mode.** Rationale: a coding subagent issues many environment/compound commands (`venv`, `pip`, `ruff`, `pytest`, `a && b`) that an allowlist cannot statically match, so without bypass they constantly prompt the human. Bypass is scoped to **trusted, short-lived build agents working inside the project dir** — the human's interactive session keeps full prompting and is not relaxed. Tradeoff: a bypass subagent can run any command unprompted, including destructive ones; only spawn it with a tightly-scoped task and review its diff before merge. To revert to prompting, spawn subagents without `mode` (or `acceptEdits`).
+- The allowlist in `.claude/settings.json` (ruff/pytest/git/gh/codegraph/python/uv/…) is what lets the **main agent** run dev + commit/push commands without prompting. It does not cover compound (`&&`, `$()`) commands — those still prompt by design, so write atomic commands. Adjust the list there.
 
 ## Testing (project-specific additions to the global policy)
 
