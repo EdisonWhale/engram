@@ -4,10 +4,10 @@
 
 **Depends on:** WS-0 (`EventStore`, models). **Codes against:** frozen interfaces only.
 
-## Pin before coding (the two spec gaps)
+## Pin before coding (both resolved — verify against a real fixture)
 
-1. **Transcript JSONL record schema.** Pin the exact shapes from the competitor research: record `Type` (`tool_call`/`tool_result`/`subagent`/`skill`/`permission`/`user`/`assistant`), and the subagent shapes `claudeAgentInput{description,isolation,model,prompt,subagentType}` and `claudeToolUseResult{status,agentId,agentType,totalDurationMs,totalTokens,totalToolUseCount,toolStats}`. Write these into a `docs/capture-schema.md` first.
-2. **Dual session id rule.** Define how `external_session_id` maps to a stable `memory_thread_id` (spec §9.2).
+1. **Transcript JSONL record schema** — pinned in [`../capture-schema.md`](../capture-schema.md). Field names are observed, not from a published spec; confirm against a real transcript fixture before relying on them.
+2. **Dual session id reconciliation rule** — pinned in spec §9.2 (resolve/mint `memory_thread_id` from active `task_contexts` at `session_start`).
 
 ## Deliverables
 

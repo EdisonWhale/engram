@@ -527,10 +527,25 @@ eval_runs
 
 Use two session identifiers:
 
-- `external_session_id`: ID from Claude Code, Codex, Cursor, or another agent.
-- `memory_thread_id`: stable cross-session memory thread for the project/task.
+- `external_session_id`: ID from Claude Code, Codex, Cursor, or another agent. Ephemeral, platform-specific, one per platform session.
+- `memory_thread_id`: stable cross-session memory thread — the durable continuity unit that is handed off. Survives across Claude Code -> Codex -> Cursor for one ongoing unit of work.
 
-This separates the platform session from the durable memory timeline.
+This separates the platform session from the durable memory timeline. The mapping is **many-to-one**: many platform sessions over time fold into one memory thread.
+
+#### Reconciliation rule (resolve or mint a thread at `session_start`)
+
+`session_start(project_path, agent, prompt, git_sha, branch)` resolves `memory_thread_id` as follows:
+
+1. Resolve `project_id` from `project_path`.
+2. Find active, non-expired `task_contexts` in that project (`status = active`, `ttl_until` in future).
+   - **Exactly one active** -> adopt its `memory_thread_id` (the resume case: "continue the eval work").
+   - **Multiple active** -> disambiguate in order: (a) prefer the task whose `branch`/`git_sha` matches the incoming session; (b) else rank `task_context.title`/`next_steps` by similarity to the incoming `prompt` and adopt the top match if above a confidence threshold; (c) else mint a new thread and flag `thread_ambiguous` in the trace for review.
+   - **None active** -> mint a new `memory_thread_id`.
+3. Record the chosen mapping (`external_session_id` -> `memory_thread_id`) on the `agent_sessions` row.
+
+Closing: `session_end` either marks the task complete (closing the thread — future sessions start fresh) or leaves it active (the thread continues into the next session, on any platform). A new branch for a clearly different task should mint a new thread rather than extend an unrelated one.
+
+Why this rule: the memory thread, not the platform session, is what "cross-session handoff" actually transfers. Tying thread resolution to active `task_contexts` (rather than to the platform session id) is what lets a Codex session pick up exactly where a Claude Code session left off.
 
 ### 9.3 Source of Truth Rule
 
