@@ -26,8 +26,28 @@ WS-0  Scaffold & Contract   (1 agent, sequential, BLOCKING)   -> 00-scaffold.md
 1. Merge WS-0, then run `codegraph init` at repo root so agents can navigate the frozen contract via `codegraph_explore`.
 2. Spawn WS-A / WS-B / WS-C in one message, each with `isolation: "worktree"`, each pointed at its task file. They code only against the frozen interfaces (use fakes/stubs for the others).
 3. Each agent's final message returns: files changed, acceptance-criteria checklist, open questions. Do **not** let them merge — they return diffs to the main agent.
-4. Review every diff before merge: `/code-review` (bugs) + `silent-failure-hunter` subagent (swallowed errors — this project has many catch/fallback paths) + `/security-review` (privacy/secret handling). Then `ruff` + `pytest` must pass.
+4. Review every diff before merge — **match review intensity to risk, default to the cheapest tier** (see "Review strategy" below). Then `ruff` + `pytest` must pass.
 5. WS-D after WS-C merges.
+
+## Review strategy (cost vs accuracy)
+
+The cost driver of a review is *how many independent agent contexts re-read the
+same code*, not how thorough it is. A single agent reading a large diff
+incrementally (cache-warm) is far cheaper than a fan-out where every agent
+cold-reads the whole diff. So **start at the cheapest tier and escalate only on
+risk**:
+
+| Tier | How | When |
+|---|---|---|
+| **0 (default)** | Main agent reads the diff hunks + enclosing functions, reasons once. Zero subagents. Scope to risk-bearing `src/` files; skip `uv.lock`/generated/tests. | ~90% of changes, incl. routine integration reviews |
+| **1** | Main agent + **one** focused subagent for a single risk axis (`silent-failure-hunter` for swallowed errors; `security-auditor` for privacy/secret). | A specific risk dimension worth an independent pass |
+| **2** | 2-4 subagents partitioned **by module/file** (disjoint surface → linear cost), not by "angle". | Large diff spanning independent subsystems |
+| **3** | The adversarial `/code-review high/xhigh/max` workflow panel (8 finders + a verifier per finding). | Pre-release audit, money/auth/migration code only |
+
+Rules: **never trigger the Tier-3 panel for a routine review** — it fans out to
+~40+ agents. When you do fan out, cap at 1-3 subagents and **run review/finder
+subagents on Sonnet, not Opus** (review is read+match+cite; Sonnet's accuracy
+holds at ~1/10 the cost, and subagents inherit the session model).
 
 ## Review tooling reference
 
