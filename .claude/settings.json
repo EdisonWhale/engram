@@ -1,4 +1,22 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(ruff:*)",
+      "Bash(pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git push:*)",
+      "Bash(gh:*)",
+      "Bash(codegraph:*)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {

@@ -34,6 +34,13 @@ Follow the `karpathy-guidelines` skill (surgical changes, surface assumptions, v
 - **ruff** for lint + format. **pytest** for tests.
 - `src/` layout. CLI entrypoint: `engram` (e.g. `engram mcp`, `engram eval`, `engram doctor`).
 
+## Parallel build: commit & permission policy
+
+- **Subagents return diffs; they do not commit or merge.** The main agent is the integration point.
+- **Auto commit + push is the main agent's job, gated on verification.** After a subagent's work passes review (`/code-review` + `silent-failure-hunter`, `/security-review` where privacy/secret code changed) AND `ruff check` + `pytest` are green, the main agent may commit and push **without asking** — but to a **per-workstream feature branch** (e.g. `ws-a-capture`), then open a PR. **Never auto-commit or push to `main`.** Verification is the gate; if review or tests fail, do not commit.
+- **Spawn parallel coding subagents in `acceptEdits` mode** so in-project file edits don't prompt, but genuinely dangerous ops (rm, network, non-allowlisted commands) still stop. Do **not** use `bypassPermissions` — it auto-approves destructive commands.
+- The allowlist in `.claude/settings.json` (ruff/pytest/git/gh/codegraph) is what lets commit+push proceed without prompting. Adjust it there.
+
 ## Testing (project-specific additions to the global policy)
 
 - **Retrieval is evaluated with replay evals, not unit tests** — gold memory IDs per query; track Recall@5 / MRR / stale_injection_rate. (Spec §12.)
