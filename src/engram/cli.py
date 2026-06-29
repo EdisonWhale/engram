@@ -126,12 +126,7 @@ def main() -> None:
 
     subparsers.add_parser("eval", help="Run retrieval evals (not yet implemented)")
 
-    doctor_parser = subparsers.add_parser("doctor", help="Health-check database and MCP wiring")
-    doctor_parser.add_argument(
-        "--db",
-        metavar="PATH",
-        help="Override the database path for this check",
-    )
+    subparsers.add_parser("doctor", help="Health-check database and MCP wiring")
 
     args = parser.parse_args()
 

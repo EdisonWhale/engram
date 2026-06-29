@@ -29,6 +29,8 @@ def open_db(path: str) -> sqlite3.Connection:
 
     Pass ``":memory:"`` in tests.
     """
+    if path != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     # WAL mode and foreign-key enforcement are connection-level settings;
