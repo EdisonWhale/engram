@@ -67,7 +67,7 @@ holds at ~1/10 the cost, and subagents inherit the session model).
 | A | Capture | WS-0 | done — integrated + server-wired |
 | B | Consolidation | WS-0 | done — integrated + server-wired |
 | C | Retrieval | WS-0 | done — integrated + server-wired |
-| D | Evals & Traces | WS-0, WS-C | unblocked (next) |
+| D | Evals & Traces | WS-0, WS-C | done — PR open against `p0-integration` |
 
 **Integration notes (P0):** A/B/C built in parallel worktrees (Sonnet 4.6), merged onto `p0-integration`,
 MCP `server.py` wired to all three. Contract extensions added during integration:
@@ -76,3 +76,9 @@ MCP `server.py` wired to all three. Contract extensions added during integration
 `memory_add` / `memory_update` tool bodies (no workstream specs manual create/update; validation-only stubs),
 the consolidation idle background loop (needs FastMCP lifespan wiring — manual + session_end flush works now),
 and `ScoredVectorStore.search_with_scores` staying consolidation-owned until P1 embeddings land.
+
+**WS-D notes:** closed a gap between the frozen WS-0 models and spec §12 — `EvalCase` was missing
+`expected_memory_types`/`must_not_include_ids` and `EvalRun` was missing `conflict_injection_rate`/
+`abstain_rate`; both extended via migration `002_eval_metrics.sql`. `engram eval --gold <path>` replays
+a gold set, persists one `RetrievalTrace` + one `EvalRun` per run, and exits non-zero on a >0.05
+recall_at_5/mrr regression vs. the previous run.

@@ -1,0 +1,28 @@
+[
+  {
+    "query": "what database does engram use as the source of truth",
+    "project_id": "proj-eval-fixture",
+    "expected_memory_ids": ["mem-decision-sqlite-source"],
+    "expected_memory_types": ["decision"],
+    "must_not_include_ids": ["mem-old-postgres-plan"],
+    "tags": ["architecture"],
+    "expected_behavior": "inject the SQLite-source-of-truth decision"
+  },
+  {
+    "query": "continue the retrieval eval implementation",
+    "project_id": "proj-eval-fixture",
+    "expected_memory_ids": ["mem-decision-sqlite-source", "task-eval-next-step"],
+    "expected_memory_types": ["decision", "project_fact"],
+    "must_not_include_ids": ["old-go-implementation-plan"],
+    "tags": ["handoff", "evals", "stale"]
+  },
+  {
+    "query": "how do I deploy a rust microservice to kubernetes",
+    "project_id": "proj-eval-fixture",
+    "expected_memory_ids": [],
+    "expected_memory_types": [],
+    "must_not_include_ids": [],
+    "tags": ["abstain", "out-of-scope"],
+    "expected_behavior": "abstain - no relevant memory in this project"
+  }
+]
