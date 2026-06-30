@@ -279,15 +279,18 @@ def test_run_eval_persists_trace_per_case(
 def test_run_eval_labels_must_not_include_violation(
     conn: sqlite3.Connection, store: SQLiteMemoryStore
 ) -> None:
-    wanted = _memory(title="Wanted decision", content="ruff check before every commit policy")
-    forbidden = _memory(title="Forbidden decision", content="ruff format policy superseded note")
-    store.create_memory(wanted)
+    # The query contains a token unique to `forbidden`'s content, so BM25
+    # guarantees it's selected -- this deterministically exercises the
+    # violation path instead of depending on incidental ranking behaviour.
+    forbidden = _memory(
+        title="Forbidden decision", content="zzqxforbiddentoken policy superseded note"
+    )
     store.create_memory(forbidden)
 
     case = EvalCase(
-        query="ruff policy",
+        query="zzqxforbiddentoken policy",
         project_id=PROJECT_ID,
-        expected_memory_ids=[wanted.id],
+        expected_memory_ids=[],
         must_not_include_ids=[forbidden.id],
     )
 
@@ -295,10 +298,5 @@ def test_run_eval_labels_must_not_include_violation(
 
     row = conn.execute("SELECT * FROM retrieval_traces").fetchone()
     selected = json.loads(row["selected_memory_ids_json"])
-    if forbidden.id in selected:
-        assert row["outcome_label"] == "violation:must_not_include"
-    else:
-        # Both memories matched "ruff" so both are normally selected by BM25;
-        # if ranking ever changes such that the forbidden id isn't injected,
-        # the label degrades gracefully to "ok" rather than a false violation.
-        assert row["outcome_label"] == "ok"
+    assert forbidden.id in selected
+    assert row["outcome_label"] == "violation:must_not_include"
