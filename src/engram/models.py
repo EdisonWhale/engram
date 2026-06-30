@@ -280,6 +280,8 @@ class EvalCase(BaseModel):
     query: str
     project_id: str
     expected_memory_ids: list[str] = Field(default_factory=list)
+    expected_memory_types: list[str] = Field(default_factory=list)
+    must_not_include_ids: list[str] = Field(default_factory=list)
     expected_behavior: str | None = None
     tags: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_now)
@@ -298,5 +300,7 @@ class EvalRun(BaseModel):
     recall_at_5: float = 0.0  # fraction of cases where expected memory is in top 5
     mrr: float = 0.0  # mean reciprocal rank
     stale_injection_rate: float = 0.0  # stale memories injected / total injected
+    conflict_injection_rate: float = 0.0  # conflicting memories injected / total injected
     avg_injected_tokens: float = 0.0
+    abstain_rate: float = 0.0  # correctly-abstained cases / cases expecting abstain
     created_at: datetime = Field(default_factory=_now)

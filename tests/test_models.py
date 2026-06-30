@@ -343,6 +343,8 @@ def test_eval_case_roundtrip() -> None:
         query="continue the retrieval eval implementation",
         project_id="proj-1",
         expected_memory_ids=["mem-decision-sqlite", "task-eval-next-step"],
+        expected_memory_types=["decision", "project_fact"],
+        must_not_include_ids=["old-go-implementation-plan"],
         expected_behavior="inject task context + decision",
         tags=["handoff", "evals", "stale"],
         created_at=_NOW,
@@ -362,7 +364,9 @@ def test_eval_run_roundtrip() -> None:
         recall_at_5=0.80,
         mrr=0.72,
         stale_injection_rate=0.05,
+        conflict_injection_rate=0.02,
         avg_injected_tokens=420.0,
+        abstain_rate=0.90,
         created_at=_NOW,
     )
     _roundtrip(er)
@@ -564,9 +568,38 @@ def test_session_summary_store_roundtrip(stores) -> None:
 
 def test_eval_run_store_roundtrip(stores) -> None:
     _, memory_store = stores
-    run = EvalRun(run_name="baseline", recall_at_5=0.8, mrr=0.7)
+    run = EvalRun(
+        run_name="baseline",
+        recall_at_5=0.8,
+        mrr=0.7,
+        conflict_injection_rate=0.1,
+        abstain_rate=0.9,
+    )
     memory_store.create_eval_run(run)
 
     runs = memory_store.list_eval_runs()
     assert len(runs) == 1
     assert runs[0].run_name == "baseline"
+    assert runs[0].conflict_injection_rate == 0.1
+    assert runs[0].abstain_rate == 0.9
+
+
+def test_eval_case_store_roundtrip(stores) -> None:
+    event_store, memory_store = stores
+    p = Project(root_path="/tmp/proj-eval-case", name="proj-eval-case")
+    event_store.create_project(p)
+
+    case = EvalCase(
+        query="continue the retrieval eval implementation",
+        project_id=p.id,
+        expected_memory_ids=["mem-1"],
+        expected_memory_types=["decision"],
+        must_not_include_ids=["mem-old"],
+        tags=["handoff"],
+    )
+    memory_store.create_eval_case(case)
+
+    cases = memory_store.list_eval_cases(project_id=p.id)
+    assert len(cases) == 1
+    assert cases[0].expected_memory_types == ["decision"]
+    assert cases[0].must_not_include_ids == ["mem-old"]

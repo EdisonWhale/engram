@@ -607,14 +607,17 @@ class SQLiteMemoryStore:
             """
             INSERT INTO eval_cases
                 (id, query, project_id, expected_memory_ids_json,
+                 expected_memory_types_json, must_not_include_ids_json,
                  expected_behavior, tags_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 case.id,
                 case.query,
                 case.project_id,
                 _jdump(case.expected_memory_ids),
+                _jdump(case.expected_memory_types),
+                _jdump(case.must_not_include_ids),
                 case.expected_behavior,
                 _jdump(case.tags),
                 _iso_req(case.created_at),
@@ -642,8 +645,8 @@ class SQLiteMemoryStore:
             """
             INSERT INTO eval_runs
                 (id, run_name, recall_at_5, mrr, stale_injection_rate,
-                 avg_injected_tokens, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 conflict_injection_rate, avg_injected_tokens, abstain_rate, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.id,
@@ -651,7 +654,9 @@ class SQLiteMemoryStore:
                 run.recall_at_5,
                 run.mrr,
                 run.stale_injection_rate,
+                run.conflict_injection_rate,
                 run.avg_injected_tokens,
+                run.abstain_rate,
                 _iso_req(run.created_at),
             ),
         )
@@ -779,6 +784,8 @@ def _row_to_eval_case(row: sqlite3.Row) -> EvalCase:
         query=row["query"],
         project_id=row["project_id"],
         expected_memory_ids=_jload(row["expected_memory_ids_json"]),
+        expected_memory_types=_jload(row["expected_memory_types_json"]),
+        must_not_include_ids=_jload(row["must_not_include_ids_json"]),
         expected_behavior=row["expected_behavior"],
         tags=_jload(row["tags_json"]),
         created_at=_dt_req(row["created_at"]),
@@ -792,6 +799,8 @@ def _row_to_eval_run(row: sqlite3.Row) -> EvalRun:
         recall_at_5=row["recall_at_5"],
         mrr=row["mrr"],
         stale_injection_rate=row["stale_injection_rate"],
+        conflict_injection_rate=row["conflict_injection_rate"],
         avg_injected_tokens=row["avg_injected_tokens"],
+        abstain_rate=row["abstain_rate"],
         created_at=_dt_req(row["created_at"]),
     )
